@@ -44,6 +44,7 @@
 #include <iostream>
 #include <fstream>
 #include <string>
+#include <string.h>
 #include "opencv2/opencv_modules.hpp"
 #include <opencv2/core/utility.hpp>
 #include "opencv2/imgcodecs.hpp"
@@ -354,6 +355,31 @@ static int parseCmdArgs(int argc, char** argv)
     return 0;
 }
 
+void transformcolor(int curIndex, int totalIndex, Mat& img) {
+    vector<Mat> m;
+    split(img, m);
+    vector<Mat> ans = m;
+    if(curIndex == 0) {
+        ans[1] = ans[1]*0;
+        ans[2] = ans[2]*0;
+        merge(ans, img);
+    }
+    if(curIndex == 1) {
+        ans[0] = ans[0] * 0;
+        ans[2] = ans[2] * 0;
+        merge(ans, img);
+    }
+    if(curIndex == 2) {
+        ans[1] = ans[1] * 0;
+        ans[0] = ans[0] * 0;
+        merge(ans, img);
+    }
+    if(curIndex == 3) {
+        for(int i = 0; i < 3; i++)
+            ans[i] = (ans[0] + ans[1] + ans[2]) / 3;
+        merge(ans, img);
+    }
+}
 
 int main(int argc, char* argv[])
 {
@@ -409,18 +435,12 @@ int main(int argc, char* argv[])
     vector<ImageFeatures> features(num_images);
     vector<Mat> images(num_images);
     vector<Size> full_img_sizes(num_images);
-    vector<VideoCapture> caps(num_images);
     double seam_work_aspect = 1;
 
     for (int i = 0; i < num_images; ++i)
     {
-        //full_img = imread(img_names[i]);
-        caps[i].open(img_names[i]);
-	    if(!caps[i].isOpened()) {
-            cout << "open error " << i << endl;
-        }
-        caps[i].read(full_img);
-	    full_img_sizes[i] = full_img.size();
+        full_img = imread(img_names[i]);
+        full_img_sizes[i] = full_img.size();
 
         if (full_img.empty())
         {
@@ -496,10 +516,9 @@ int main(int argc, char* argv[])
     vector<Mat> img_subset;
     vector<String> img_names_subset;
     vector<Size> full_img_sizes_subset;
-    vector<VideoCapture> cap_subset;
+    cout << "matched images " << indices.size() << endl;
     for (size_t i = 0; i < indices.size(); ++i)
     {
-        cap_subset.push_back(caps[indices[i]]);
         img_names_subset.push_back(img_names[indices[i]]);
         img_subset.push_back(images[indices[i]]);
         full_img_sizes_subset.push_back(full_img_sizes[indices[i]]);
@@ -725,41 +744,33 @@ int main(int argc, char* argv[])
 #endif
 
     Mat img_warped, img_warped_s;
-    vector<Mat> dilated_mask(num_images), seam_mask(num_images), mask_warped(num_images);
-    Mat mask;
-    //Ptr<Blender> blender;
-    //Ptr<Timelapser> timelapser;
+    Mat dilated_mask, seam_mask, mask, mask_warped;
+    Ptr<Blender> blender;
+    Ptr<Timelapser> timelapser;
     //double compose_seam_aspect = 1;
     double compose_work_aspect = 1;
 
-    bool writerOpened = false;
-    VideoWriter writer;
-    int frameCount = 0;
+    for (int img_idx = 0; img_idx < num_images; ++img_idx)
+    {
+        LOGLN("Compositing image #" << indices[img_idx]+1);
 
-    cout << caps[0].get(CV_CAP_PROP_FRAME_COUNT) << endl;
-    bool readFinish = false;
-    
-    vector<Mat> K(num_images);
-
-#pragma omp parallel for
-    for(int img_idx = 0; img_idx < num_images; ++img_idx) {
-        if(!cap_subset[img_idx].read(full_img))
-    		cout << "cap " << img_idx << " read error" << endl;
+        // Read image and resize it if necessary
+        full_img = imread(img_names[img_idx]);
         if (!is_compose_scale_set)
         {
             if (compose_megapix > 0)
                 compose_scale = min(1.0, sqrt(compose_megapix * 1e6 / full_img.size().area()));
             is_compose_scale_set = true;
 
-                // Compute relative scales
-                //compose_seam_aspect = compose_scale / seam_scale;
+            // Compute relative scales
+            //compose_seam_aspect = compose_scale / seam_scale;
             compose_work_aspect = compose_scale / work_scale;
 
-                // Update warped image scale
+            // Update warped image scale
             warped_image_scale *= static_cast<float>(compose_work_aspect);
             warper = warper_creator->create(warped_image_scale);
 
-                // Update corners and sizes
+            // Update corners and sizes
             for (int i = 0; i < num_images; ++i)
             {
                 // Update intrinsics
@@ -775,8 +786,9 @@ int main(int argc, char* argv[])
                     sz.height = cvRound(full_img_sizes[i].height * compose_scale);
                 }
 
-                cameras[i].K().convertTo(K[img_idx], CV_32F);
-                Rect roi = warper->warpRoi(sz, K[img_idx], cameras[i].R);
+                Mat K;
+                cameras[i].K().convertTo(K, CV_32F);
+                Rect roi = warper->warpRoi(sz, K, cameras[i].R);
                 corners[i] = roi.tl();
                 sizes[i] = roi.size();
             }
@@ -788,123 +800,94 @@ int main(int argc, char* argv[])
         full_img.release();
         Size img_size = img.size();
 
-        cameras[img_idx].K().convertTo(K[img_idx], CV_32F);
+        Mat K;
+        cameras[img_idx].K().convertTo(K, CV_32F);
 
         // Warp the current image
-        warper->warp(img, K[img_idx], cameras[img_idx].R, INTER_LINEAR, BORDER_REFLECT, img_warped);
+        warper->warp(img, K, cameras[img_idx].R, INTER_LINEAR, BORDER_REFLECT, img_warped);
 
         // Warp the current image mask
         mask.create(img_size, CV_8U);
         mask.setTo(Scalar::all(255));
-        warper->warp(mask, K[img_idx], cameras[img_idx].R, INTER_NEAREST, BORDER_CONSTANT, mask_warped[img_idx]);
-		compensator->apply(img_idx, corners[img_idx], img_warped, mask_warped[img_idx]);
+        warper->warp(mask, K, cameras[img_idx].R, INTER_NEAREST, BORDER_CONSTANT, mask_warped);
+
         // Compensate exposure
-        
+        compensator->apply(img_idx, corners[img_idx], img_warped, mask_warped);
 
         img_warped.convertTo(img_warped_s, CV_16S);
         img_warped.release();
         img.release();
         mask.release();
 
-        dilate(masks_warped[img_idx], dilated_mask[img_idx], Mat());
-        resize(dilated_mask[img_idx], seam_mask[img_idx], mask_warped[img_idx].size());
-        mask_warped[img_idx] = seam_mask[img_idx] & mask_warped[img_idx];
-    }
-    
-    while(true) {
-    	Ptr<Blender> blender;
-        Ptr<Timelapser> timelapser;
-//#pragma omp parallel for
-        for (int img_idx = 0; img_idx < num_images; ++img_idx)
+        dilate(masks_warped[img_idx], dilated_mask, Mat());
+        resize(dilated_mask, seam_mask, mask_warped.size());
+        mask_warped = seam_mask & mask_warped;
+
+        if (!blender && !timelapse)
         {
-            LOGLN("Compositing image #" << indices[img_idx]+1);
-            
-            // Read image and resize it if necessary
-            //full_img = imread(img_names[img_idx]);
-            if(!cap_subset[img_idx].read(full_img)) {
-                readFinish = true;
-                break;
-            }
-
-            if (abs(compose_scale - 1) > 1e-1)
-                resize(full_img, img, Size(), compose_scale, compose_scale);
-            else
-                img = full_img;
-            full_img.release();
-            Size img_size = img.size();
-        	warper->warp(img, K[img_idx], cameras[img_idx].R, INTER_LINEAR, BORDER_REFLECT, img_warped);
-            img_warped.convertTo(img_warped_s, CV_16S);
-        	compensator->apply(img_idx, corners[img_idx], img_warped, mask_warped[img_idx]);
-
-            if (!blender && !timelapse)
+            blender = Blender::createDefault(blend_type, try_cuda);
+            Size dst_sz = resultRoi(corners, sizes).size();
+            float blend_width = sqrt(static_cast<float>(dst_sz.area())) * blend_strength / 100.f;
+            if (blend_width < 1.f)
+                blender = Blender::createDefault(Blender::NO, try_cuda);
+            else if (blend_type == Blender::MULTI_BAND)
             {
-                blender = Blender::createDefault(blend_type, try_cuda);
-                Size dst_sz = resultRoi(corners, sizes).size();
-                float blend_width = sqrt(static_cast<float>(dst_sz.area())) * blend_strength / 100.f;
-                if (blend_width < 1.f)
-                    blender = Blender::createDefault(Blender::NO, try_cuda);
-                else if (blend_type == Blender::MULTI_BAND)
-                {
-                    MultiBandBlender* mb = dynamic_cast<MultiBandBlender*>(blender.get());
-                    mb->setNumBands(static_cast<int>(ceil(log(blend_width)/log(2.)) - 1.));
-                    LOGLN("Multi-band blender, number of bands: " << mb->numBands());
-                }
-                else if (blend_type == Blender::FEATHER)
-                {
-                    FeatherBlender* fb = dynamic_cast<FeatherBlender*>(blender.get());
-                    fb->setSharpness(1.f/blend_width);
-                    LOGLN("Feather blender, sharpness: " << fb->sharpness());
-                }
-                blender->prepare(corners, sizes);
+                MultiBandBlender* mb = dynamic_cast<MultiBandBlender*>(blender.get());
+                mb->setNumBands(static_cast<int>(ceil(log(blend_width)/log(2.)) - 1.));
+                LOGLN("Multi-band blender, number of bands: " << mb->numBands());
             }
-            else if (!timelapser && timelapse)
+            else if (blend_type == Blender::FEATHER)
             {
-                timelapser = Timelapser::createDefault(timelapse_type);
-                timelapser->initialize(corners, sizes);
+                FeatherBlender* fb = dynamic_cast<FeatherBlender*>(blender.get());
+                fb->setSharpness(1.f/blend_width);
+                LOGLN("Feather blender, sharpness: " << fb->sharpness());
             }
+            blender->prepare(corners, sizes);
+        }
+        else if (!timelapser && timelapse)
+        {
+            timelapser = Timelapser::createDefault(timelapse_type);
+            timelapser->initialize(corners, sizes);
+        }
 
-            // Blend the current image
-            if (timelapse)
+        // Blend the current image
+        if (timelapse)
+        {
+            timelapser->process(img_warped_s, Mat::ones(img_warped_s.size(), CV_8UC1), corners[img_idx]);
+            String fixedFileName;
+            size_t pos_s = String(img_names[img_idx]).find_last_of("/\\");
+            if (pos_s == String::npos)
             {
-                timelapser->process(img_warped_s, Mat::ones(img_warped_s.size(), CV_8UC1), corners[img_idx]);
-                String fixedFileName;
-                size_t pos_s = String(img_names[img_idx]).find_last_of("/\\");
-                if (pos_s == String::npos)
-                {
-                    fixedFileName = "fixed_" + img_names[img_idx];
-                }
-                else
-                {
-                    fixedFileName = "fixed_" + String(img_names[img_idx]).substr(pos_s + 1, String(img_names[img_idx]).length() - pos_s);
-                }
-                imwrite(fixedFileName, timelapser->getDst());
+                fixedFileName = "fixed_" + img_names[img_idx];
             }
             else
             {
-                blender->feed(img_warped_s, mask_warped[img_idx], corners[img_idx]);
+                fixedFileName = "fixed_" + String(img_names[img_idx]).substr(pos_s + 1, String(img_names[img_idx]).length() - pos_s);
             }
+            imwrite(fixedFileName, timelapser->getDst());
         }
-        if(readFinish)
-            break;
-        if (!timelapse)
+        else
         {
-            Mat result, result_mask;
-            blender->blend(result, result_mask);
-
-            LOGLN("Compositing, time: " << ((getTickCount() - t) / getTickFrequency()) << " sec");
-            if(!writerOpened) {
-                int ex = static_cast<int>(caps[0].get(CV_CAP_PROP_FOURCC));
-                writer.open("result.avi", ex, caps[0].get(CV_CAP_PROP_FPS), Size(result.cols, result.rows));
-                writerOpened = true;
-            }
-            Mat m(result.cols, result.rows, CV_8UC3);
-            result.convertTo(m, CV_8U);
-            //imwrite(result_name, result);
-	        writer.write(m);
+            //stringstream ss;
+            //ss << img_idx;
+            //string mask_name = "mask_" + ss.str();
+            //mask_name += ".jpg";
+            //imwrite(mask_name, mask_warped);
+            //transformcolor(img_idx, 5, img_warped_s);
+            blender->feed(img_warped_s, mask_warped, corners[img_idx]);
         }
-        cout << "frameCount " << frameCount++ << endl;
     }
-    cout << "finish" << endl;
+
+    if (!timelapse)
+    {
+        Mat result, result_mask;
+        blender->blend(result, result_mask);
+
+        LOGLN("Compositing, time: " << ((getTickCount() - t) / getTickFrequency()) << " sec");
+
+        imwrite(result_name, result);
+    }
+
     LOGLN("Finished, total time: " << ((getTickCount() - app_start_time) / getTickFrequency()) << " sec");
     return 0;
 }
